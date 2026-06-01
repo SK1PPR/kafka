@@ -1,0 +1,12 @@
+{
+  "lsp": {
+    "clangd": {
+      "initialization_options": {
+        "fallbackFlags": [
+          "-std=c++23",
+          "-I/Users/khushalagrawal/personal/kafka-cpp/include"
+        ]
+      }
+    }
+  }
+}

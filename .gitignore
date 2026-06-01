@@ -532,6 +532,7 @@ ui_*.h
 *.qmlc
 *.jsc
 Makefile*
+!Makefile
 *build-*
 *.qm
 *.prl
@@ -942,6 +943,7 @@ CMakeFiles
 CMakeScripts
 Testing
 Makefile
+!Makefile
 cmake_install.cmake
 install_manifest.txt
 compile_commands.json
