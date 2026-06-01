@@ -1,34 +1,66 @@
-[![progress-banner](https://backend.codecrafters.io/progress/kafka/b36350fb-6e8d-4414-9038-73cc7c89bfa0)](https://app.codecrafters.io/users/SK1PPR?r=2qF)
+# Kafka C++ Clone
 
-This is a starting point for C++ solutions to the
-["Build Your Own Kafka" Challenge](https://codecrafters.io/challenges/kafka).
+A small Kafka-compatible broker written in C++.
 
-In this challenge, you'll build a toy Kafka clone that's capable of accepting
-and responding to ApiVersions & Fetch API requests. You'll also learn about
-encoding and decoding messages using the Kafka wire protocol. You'll also learn
-about handling the network protocol, event loops, TCP sockets and more.
+This project implements the core pieces of a Kafka broker from the wire protocol upward: TCP framing, request decoding, response encoding, persistent client connections, and concurrent client handling.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+## Features
 
-# Passing the first stage
+- TCP broker listening on port `9092`
+- Kafka request frame parsing
+- Big-endian protocol encoder and decoder
+- `ApiVersions` request handling
+- Persistent client connections
+- Concurrent clients using one thread per connection
+- Simple server, connection, and request handler abstractions
 
-The entry point for your Kafka implementation is in `src/main.cpp`. Study and
-uncomment the relevant code, and then run the command below to execute the tests
-on our servers:
+## Project Structure
 
-```sh
-codecrafters submit
+```text
+include/kafka/
+  connection.hpp
+  request.hpp
+  request_handler.hpp
+  server.hpp
+  protocol/
+    decoder.hpp
+    encoder.hpp
+
+src/
+  connection.cpp
+  main.cpp
+  request.cpp
+  request_handler.cpp
+  server.cpp
+  protocol/
+    decoder.cpp
+    encoder.cpp
 ```
 
-That's all!
+## Build
 
-# Stage 2 & beyond
+```sh
+make
+```
 
-Note: This section is for stages 2 and beyond.
+The executable is written to:
 
-1. Ensure you have `cmake` installed locally
-1. Run `./your_program.sh` to run your Kafka broker, which is implemented in
-   `src/main.cpp`.
-1. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
-   output will be streamed to your terminal.
+```text
+build/kafka
+```
+
+## Run
+
+```sh
+./build/kafka
+```
+
+## Clean
+
+```sh
+make clean
+```
+
+## Notes
+
+This is an educational Kafka clone, not a production broker. The current focus is protocol correctness, connection handling, and building the broker architecture incrementally.
