@@ -49,5 +49,15 @@ namespace kafka {
             value |= static_cast<std::uint64_t>(static_cast<std::uint8_t>(_data[_position++]));
             return static_cast<std::int64_t>(value);
         }
+
+        std::vector<char> Decoder::read_bytes(std::size_t len) {
+            if (_size - _position < len) {
+                throw std::out_of_range("Decoder::read_bytes: out of range");
+            }
+            std::vector<char> result(len);
+            std::copy(_data + _position, _data + _position + len, result.begin());
+            _position += len;
+            return result;
+        }
     }
 }
