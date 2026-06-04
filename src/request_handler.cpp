@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include <kafka/cluster_metadata.hpp>
 #include <kafka/protocol/api_key.hpp>
 #include <kafka/protocol/encoder.hpp>
 #include <kafka/request.hpp>
@@ -104,8 +105,38 @@ namespace kafka {
         protocol::DescribeTopicPartitionsResponseBody body;
         body.throttle_time_ms = 0;
         body.next_cursor = -1;
+        auto metadata = ClusterMetadata::read_from_default_path();
 
         for (const auto& requested_topic : describe_request.topics) {
+            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
+            if (topic_metadata != nullptr) {
+                protocol::DescribeTopicPartitionsResponseTopic topic_response{
+                    protocol::error::None,
+                    requested_topic.name,
+                    topic_metadata->topic_id,
+                    false,
+                    {},
+                    0
+                };
+
+                for (const auto& partition_metadata : topic_metadata->partitions) {
+                    topic_response.partitions.push_back(protocol::DescribeTopicPartitionsResponsePartition{
+                        protocol::error::None,
+                        partition_metadata.partition_index,
+                        partition_metadata.leader_id,
+                        partition_metadata.leader_epoch,
+                        partition_metadata.replica_nodes,
+                        partition_metadata.isr_nodes,
+                        {},
+                        {},
+                        {}
+                    });
+                }
+
+                body.topics.push_back(topic_response);
+                continue;
+            }
+
             body.topics.push_back(protocol::DescribeTopicPartitionsResponseTopic{
                 protocol::error::UnknownTopicOrPartition,
                 requested_topic.name,
