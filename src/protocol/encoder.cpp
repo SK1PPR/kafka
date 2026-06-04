@@ -37,6 +37,24 @@ namespace kafka {
             _buffer.push_back(static_cast<char>(raw & 0xff));
         }
 
+        void Encoder::write_unsigned_varint(std::uint32_t value) {
+            while ((value & 0xffffff80) != 0) {
+                write_int8(static_cast<std::int8_t>((value & 0x7f) | 0x80));
+                value >>= 7;
+            }
+
+            write_int8(static_cast<std::int8_t>(value));
+        }
+
+        void Encoder::write_compact_string(const std::string& value) {
+            write_unsigned_varint(static_cast<std::uint32_t>(value.size() + 1));
+            _buffer.insert(_buffer.end(), value.begin(), value.end());
+        }
+
+        void Encoder::write_tag_buffer() {
+            write_unsigned_varint(0);
+        }
+
         void Encoder::write_bytes(const std::vector<char>& bytes) {
             _buffer.insert(_buffer.end(), bytes.begin(), bytes.end());
         }

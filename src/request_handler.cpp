@@ -1,26 +1,63 @@
 #include <kafka/request_handler.hpp>
 
+#include <string>
+
 #include <kafka/protocol/api_key.hpp>
-#include <kafka/protocol/decoder.hpp>
 #include <kafka/protocol/encoder.hpp>
 #include <kafka/request.hpp>
 #include <kafka/response.hpp>
+#include <kafka/error.hpp>
+#include <kafka/protocol/apis/api_versions.hpp>
+#include <kafka/protocol/apis/describe_topic_partitions.hpp>
+#include <kafka/protocol/error_codes.hpp>
 
 namespace kafka {
     std::vector<char> RequestHandler::handle_request(const std::vector<char>& input_buffer) {
-        Request request = decode_request(input_buffer);
+        try {
+            Request request = decode_request(input_buffer);
 
-        if (auto api_key = protocol::api_key_from_int(request.request_api_key)) {
-            if (!protocol::supports_version(*api_key, request.request_api_version)) {
-                return encode_response(handle_unsupported_version(request));
-            }
-
-            if (*api_key == protocol::ApiKey::ApiVersion) {
-                return encode_response(handle_api_versions(request));
+            switch (request.header.api_key) {
+                case protocol::ApiKey::ApiVersion:
+                    return encode_response(handle_api_versions(request));
+                case protocol::ApiKey::DescribeTopicPartition:
+                    return encode_response(handle_describe_topic_partition(request));
+                default:
+                    return encode_response(handle_error(request.header.correlation_id, protocol::error::UnsupportedError));
             }
         }
+        catch (const KafkaRequestError& error) {
+            return encode_response(handle_error(error.correlation_id(), error.error_code()));
+        }
 
-        return encode_response(handle_unsupported(request));
+    }
+
+    RequestHeader RequestHandler::decode_request_header(protocol::Decoder& decoder) {
+        RequestHeader header;
+        header.message_size = decoder.read_int32();
+        int16_t request_api_key = decoder.read_int16();
+        header.api_version = decoder.read_int16();
+        header.correlation_id = decoder.read_int32();
+        auto api_key = protocol::api_key_from_int(request_api_key);
+        if (!api_key) {
+            throw KafkaRequestError{header.correlation_id, protocol::error::UnsupportedError};
+        }
+        header.api_key = *api_key;
+        if (!protocol::supports_version(header.api_key, header.api_version)) {
+            throw KafkaRequestError{header.correlation_id, protocol::error::UnsupportedError};
+        }
+        header.header_version = protocol::request_header_version(header.api_key, header.api_version);
+
+        if (header.header_version == 1) {
+            header.client_id = decoder.read_nullable_string();
+            if (header.api_key == protocol::ApiKey::DescribeTopicPartition) {
+                decoder.read_tag_buffer();
+            }
+        } else if (header.header_version == 2) {
+            header.client_id = decoder.read_compact_nullable_string();
+            decoder.read_tag_buffer();
+        }
+
+        return header;
     }
 
     Request RequestHandler::decode_request(const std::vector<char>& input_buffer) {
@@ -28,11 +65,8 @@ namespace kafka {
         protocol::Decoder decoder(buffer, input_buffer.size());
 
         Request request;
-        request.message_size = decoder.read_int32();
-        request.request_api_key = decoder.read_int16();
-        request.request_api_version = decoder.read_int16();
-        request.correlation_id = decoder.read_int32();
-        request.buffer = decoder.read_bytes(request.message_size - 8);
+        request.header = decode_request_header(decoder);
+        request.buffer = decoder.read_body();
 
         return request;
     }
@@ -40,33 +74,54 @@ namespace kafka {
     Response RequestHandler::handle_api_versions(const Request& request) {
         Response response{
             Response::Type::ApiVersions,
-            request.correlation_id,
+            request.header.correlation_id,
             0,
-            ApiVersionsResponseBody{
+            protocol::ApiVersionsResponseBody{
                 0,
                 std::vector<protocol::ApiSpec>(protocol::supported_apis().begin(), protocol::supported_apis().end()),
                 0
-            }
+            },
+            protocol::DescribeTopicPartitionsResponseBody{}
         };
 
         return response;
     }
 
-    Response RequestHandler::handle_unsupported(const Request& request) {
+    Response RequestHandler::handle_error(const std::int32_t correlation_id, const std::int16_t error_code) {
         return Response{
             Response::Type::Error,
-            request.correlation_id,
-            static_cast<std::int16_t>(35),
-            ApiVersionsResponseBody{}
+            correlation_id,
+            error_code,
+            protocol::ApiVersionsResponseBody{},
+            protocol::DescribeTopicPartitionsResponseBody{}
         };
     }
 
-    Response RequestHandler::handle_unsupported_version(const Request& request) {
+    Response RequestHandler::handle_describe_topic_partition(const Request& request) {
+        protocol::Decoder decoder(request.buffer.data(), request.buffer.size());
+        auto describe_request = protocol::read_describe_topic_partitions_request(decoder);
+
+        protocol::DescribeTopicPartitionsResponseBody body;
+        body.throttle_time_ms = 0;
+        body.next_cursor = -1;
+
+        for (const auto& requested_topic : describe_request.topics) {
+            body.topics.push_back(protocol::DescribeTopicPartitionsResponseTopic{
+                protocol::error::UnknownTopicOrPartition,
+                requested_topic.name,
+                {},
+                false,
+                {},
+                0
+            });
+        }
+
         return Response{
-            Response::Type::Error,
-            request.correlation_id,
-            static_cast<std::int16_t>(35),
-            ApiVersionsResponseBody{}
+            Response::Type::DescribeTopicPartition,
+            request.header.correlation_id,
+            protocol::error::None,
+            protocol::ApiVersionsResponseBody{},
+            body
         };
     }
 
@@ -76,20 +131,12 @@ namespace kafka {
         encoder.write_int32(response.correlation_id);
 
         if (response.type == Response::Type::ApiVersions) {
-            encoder.write_int16(response.api_versions.error_code);
-            encoder.write_int8(static_cast<std::int8_t>(response.api_versions.api_keys.size() + 1));
-
-            for (const auto& api : response.api_versions.api_keys) {
-                encoder.write_int16(static_cast<std::int16_t>(api.key));
-                encoder.write_int16(api.min_version);
-                encoder.write_int16(api.max_version);
-                encoder.write_int8(0); // TAG_BUFFER
-            }
-
-            encoder.write_int32(response.api_versions.throttle_time_ms);
-            encoder.write_int8(0); // TAG_BUFFER
+            protocol::write_api_versions_response(encoder, response.api_versions);
         } else if (response.type == Response::Type::Error) {
             encoder.write_int16(response.error_code);
+        } else if (response.type == Response::Type::DescribeTopicPartition) {
+            encoder.write_tag_buffer();
+            protocol::write_describe_topic_partitions_response(encoder, response.describe_topic_partition);
         }
 
         encoder.write_message_size();

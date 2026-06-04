@@ -5,8 +5,8 @@
 namespace kafka {
     namespace protocol {
         inline constexpr std::array<ApiSpec, 2> SUPPORTED_APIS = {{
-            {ApiKey::ApiVersion, 0, 4},
-            {ApiKey::DescribeTopicPartition, 0, 0}
+            {ApiKey::ApiVersion, 0, 4, 0, 0},
+            {ApiKey::DescribeTopicPartition, 0, 0, 1, 1}
         }};
 
         std::span<const ApiSpec> supported_apis() {
@@ -22,9 +22,9 @@ namespace kafka {
             return std::nullopt;
         }
 
-        std::optional<ApiSpec> spec_for(ApiKey key) {
+        std::optional<ApiSpec> spec_for(ApiKey key, std::int16_t version) {
             for (const auto& spec : SUPPORTED_APIS) {
-                if (spec.key == key) {
+                if (spec.key == key && (version >= spec.min_version && version <= spec.max_version)) {
                     return spec;
                 }
             }
@@ -32,11 +32,11 @@ namespace kafka {
         }
 
         bool supports_version(ApiKey key, std::int16_t version) {
-            if (auto spec = spec_for(key)) {
-                return version >= spec->min_version && version <= spec->max_version;
-            }
-            return false;
+            return spec_for(key, version).has_value();
         }
 
+        int16_t request_header_version(ApiKey key, std::int16_t version) {
+            return spec_for(key, version).value().request_header_version;
+        }
     }
 }

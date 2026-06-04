@@ -3,26 +3,23 @@
 #include <cstdint>
 #include <vector>
 
-#include <kafka/protocol/api_key.hpp>
+#include <kafka/protocol/apis/api_versions.hpp>
+#include <kafka/protocol/apis/describe_topic_partitions.hpp>
 
 namespace kafka {
-
-struct ApiVersionsResponseBody {
-    std::int16_t error_code;
-    std::vector<protocol::ApiSpec> api_keys;
-    std::int32_t throttle_time_ms;
-};
 
 struct Response {
     enum class Type {
         ApiVersions,
+        DescribeTopicPartition,
         Error
     };
 
     Type type;
     std::int32_t correlation_id;
     std::int16_t error_code;
-    ApiVersionsResponseBody api_versions;
+    protocol::ApiVersionsResponseBody api_versions;
+    protocol::DescribeTopicPartitionsResponseBody describe_topic_partition;
 };
 
 } // namespace kafka

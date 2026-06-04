@@ -1,5 +1,6 @@
 #include <kafka/protocol/decoder.hpp>
 
+#include <limits>
 #include <stdexcept>
 
 namespace kafka {
@@ -50,6 +51,65 @@ namespace kafka {
             return static_cast<std::int64_t>(value);
         }
 
+        std::uint32_t Decoder::read_unsigned_varint() {
+            std::uint32_t value = 0;
+            int shift = 0;
+
+            for (int i = 0; i < 5; ++i) {
+                std::uint8_t byte = static_cast<std::uint8_t>(read_int8());
+                value |= static_cast<std::uint32_t>(byte & 0x7f) << shift;
+
+                if ((byte & 0x80) == 0) {
+                    return value;
+                }
+
+                shift += 7;
+            }
+
+            throw std::runtime_error("Decoder::read_unsigned_varint: too long");
+        }
+
+        std::optional<std::string> Decoder::read_nullable_string() {
+            std::int16_t length = read_int16();
+            if (length < 0) {
+                return std::nullopt;
+            }
+
+            auto bytes = read_bytes(static_cast<std::size_t>(length));
+            return std::string(bytes.begin(), bytes.end());
+        }
+
+        std::optional<std::string> Decoder::read_compact_nullable_string() {
+            std::uint32_t encoded_size = read_unsigned_varint();
+            if (encoded_size == 0) {
+                return std::nullopt;
+            }
+
+            auto bytes = read_bytes(static_cast<std::size_t>(encoded_size - 1));
+            return std::string(bytes.begin(), bytes.end());
+        }
+
+        std::string Decoder::read_compact_string() {
+            std::uint32_t encoded_size = read_unsigned_varint();
+            if (encoded_size == 0) {
+                throw std::runtime_error("Decoder::read_compact_string: null string");
+            }
+
+            auto length = static_cast<std::size_t>(encoded_size - 1);
+            auto bytes = read_bytes(length);
+            return std::string(bytes.begin(), bytes.end());
+        }
+
+        void Decoder::read_tag_buffer() {
+            std::uint32_t tagged_field_count = read_unsigned_varint();
+
+            for (std::uint32_t i = 0; i < tagged_field_count; ++i) {
+                read_unsigned_varint();
+                std::uint32_t size = read_unsigned_varint();
+                read_bytes(size);
+            }
+        }
+
         std::vector<char> Decoder::read_bytes(std::size_t len) {
             if (_size - _position < len) {
                 throw std::out_of_range("Decoder::read_bytes: out of range");
@@ -58,6 +118,14 @@ namespace kafka {
             std::copy(_data + _position, _data + _position + len, result.begin());
             _position += len;
             return result;
+        }
+
+        std::vector<char> Decoder::read_body() {
+            return read_bytes(_size - _position);
+        }
+
+        std::size_t Decoder::position() const {
+            return _position;
         }
     }
 }
