@@ -1,5 +1,6 @@
 #include <kafka/request_handler.hpp>
 
+#include <algorithm>
 #include <string>
 
 #include <kafka/cluster_metadata.hpp>
@@ -146,6 +147,10 @@ namespace kafka {
                 0
             });
         }
+
+        std::sort(body.topics.begin(), body.topics.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.name < rhs.name;
+        });
 
         return Response{
             Response::Type::DescribeTopicPartition,
