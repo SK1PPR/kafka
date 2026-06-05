@@ -8,7 +8,8 @@ namespace kafka {
     namespace protocol {
         enum class ApiKey : std::int16_t {
           ApiVersion = 18,
-          DescribeTopicPartition = 75
+          DescribeTopicPartition = 75,
+          Produce = 0
         };
 
         struct ApiSpec {
