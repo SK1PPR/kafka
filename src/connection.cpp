@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include <kafka/request_handler.hpp>
@@ -13,7 +14,8 @@ namespace kafka {
 
     static std::int32_t read_int32_be(const char* buffer);
 
-    Connection::Connection(int client_fd): _client_fd(client_fd) {}
+    Connection::Connection(int client_fd, std::string log_dir)
+        : _client_fd(client_fd), _log_dir(std::move(log_dir)) {}
     Connection::~Connection() {
         if (_client_fd >= 0) {
             close(_client_fd);
@@ -29,6 +31,7 @@ namespace kafka {
                 break;
             }
 
+            RequestHandler::set_log_dir(_log_dir);
             std::vector<char> response = RequestHandler::handle_request(frame);
             send_frame(response);
         }

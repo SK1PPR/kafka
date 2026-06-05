@@ -1,7 +1,10 @@
 #include <kafka/request_handler.hpp>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <utility>
 
 #include <kafka/cluster_metadata.hpp>
 #include <kafka/protocol/api_key.hpp>
@@ -15,6 +18,37 @@
 #include <kafka/protocol/error_codes.hpp>
 
 namespace kafka {
+    namespace {
+        thread_local std::string LOG_DIR = "/tmp/kraft-combined-logs";
+
+        std::filesystem::path topic_partition_log_path(const std::string& topic, std::int32_t partition_index) {
+            return std::filesystem::path(LOG_DIR) /
+                (topic + "-" + std::to_string(partition_index)) /
+                "00000000000000000000.log";
+        }
+
+        bool write_partition_records(
+            const std::string& topic,
+            std::int32_t partition_index,
+            const std::vector<char>& records
+        ) {
+            auto path = topic_partition_log_path(topic, partition_index);
+            std::filesystem::create_directories(path.parent_path());
+
+            std::ofstream file(path, std::ios::binary | std::ios::app);
+            if (!file) {
+                return false;
+            }
+
+            file.write(records.data(), static_cast<std::streamsize>(records.size()));
+            return file.good();
+        }
+    }
+
+    void RequestHandler::set_log_dir(std::string log_dir) {
+        LOG_DIR = std::move(log_dir);
+    }
+
     std::vector<char> RequestHandler::handle_request(const std::vector<char>& input_buffer) {
         try {
             Request request = decode_request(input_buffer);
@@ -189,6 +223,7 @@ namespace kafka {
                         });
 
                 if (partition_exists) {
+                    write_partition_records(requested_topic.name, requested_partition.index, requested_partition.records);
                     topic_response.partitions.push_back(protocol::ProduceResponsePartition{
                         requested_partition.index,
                         protocol::error::None,

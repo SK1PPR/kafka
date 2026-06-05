@@ -3,12 +3,14 @@
 #include <kafka/request.hpp>
 #include <kafka/response.hpp>
 #include <kafka/protocol/decoder.hpp>
+#include <string>
 #include <vector>
 
 namespace kafka {
     class RequestHandler {
         public:
             static std::vector<char> handle_request(const std::vector<char>& request);
+            static void set_log_dir(std::string log_dir);
 
         private:
             static RequestHeader decode_request_header(protocol::Decoder& decoder);

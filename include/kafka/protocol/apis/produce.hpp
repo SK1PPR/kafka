@@ -11,6 +11,7 @@ namespace kafka::protocol {
 
 struct ProduceRequestPartition {
     std::int32_t index;
+    std::vector<char> records;
 };
 
 struct ProduceRequestTopic {

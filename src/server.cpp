@@ -6,11 +6,13 @@
 #include <unistd.h>
 #include <iostream>
 #include <thread>
+#include <utility>
 
 #include <kafka/connection.hpp>
 
 namespace kafka {
-    Server::Server(int port) : _port(port), _server_fd(-1) {}
+    Server::Server(int port, std::string log_dir)
+        : _port(port), _server_fd(-1), _log_dir(std::move(log_dir)) {}
 
     int Server::run() {
         int setup_result = setup_socket();
@@ -24,8 +26,8 @@ namespace kafka {
                 break;
             }
 
-            std::thread([client_fd]() {
-                Connection conn(client_fd);
+            std::thread([client_fd, log_dir = _log_dir]() {
+                Connection conn(client_fd, log_dir);
                 conn.handle();
             }).detach();
         }

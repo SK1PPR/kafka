@@ -3,13 +3,13 @@
 namespace kafka::protocol {
 
 namespace {
-    void skip_compact_nullable_records(Decoder& decoder) {
+    std::vector<char> read_compact_nullable_records(Decoder& decoder) {
         std::uint32_t encoded_size = decoder.read_unsigned_varint();
         if (encoded_size == 0) {
-            return;
+            return {};
         }
 
-        decoder.read_bytes(encoded_size - 1);
+        return decoder.read_bytes(encoded_size - 1);
     }
 }
 
@@ -28,7 +28,7 @@ ProduceRequestBody read_produce_request(Decoder& decoder) {
                 [](Decoder& decoder) {
                     ProduceRequestPartition partition;
                     partition.index = decoder.read_int32();
-                    skip_compact_nullable_records(decoder);
+                    partition.records = read_compact_nullable_records(decoder);
                     decoder.read_tag_buffer();
                     return partition;
                 }
