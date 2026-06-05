@@ -174,12 +174,31 @@ namespace kafka {
 
         protocol::ProduceResponseBody body;
         body.throttle_time_ms = 0;
+        auto metadata = ClusterMetadata::read_from_default_path();
 
         for (const auto& requested_topic : produce_request.topics) {
             protocol::ProduceResponseTopic topic_response;
             topic_response.name = requested_topic.name;
+            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
 
             for (const auto& requested_partition : requested_topic.partitions) {
+                const bool partition_exists = topic_metadata != nullptr &&
+                    std::any_of(topic_metadata->partitions.begin(), topic_metadata->partitions.end(),
+                        [&](const auto& partition_metadata) {
+                            return partition_metadata.partition_index == requested_partition.index;
+                        });
+
+                if (partition_exists) {
+                    topic_response.partitions.push_back(protocol::ProduceResponsePartition{
+                        requested_partition.index,
+                        protocol::error::None,
+                        0,
+                        -1,
+                        0
+                    });
+                    continue;
+                }
+
                 topic_response.partitions.push_back(protocol::ProduceResponsePartition{
                     requested_partition.index,
                     protocol::error::UnknownTopicOrPartition,
