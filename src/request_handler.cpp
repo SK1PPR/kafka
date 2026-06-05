@@ -11,6 +11,7 @@
 #include <kafka/error.hpp>
 #include <kafka/protocol/apis/api_versions.hpp>
 #include <kafka/protocol/apis/describe_topic_partitions.hpp>
+#include <kafka/protocol/apis/produce.hpp>
 #include <kafka/protocol/error_codes.hpp>
 
 namespace kafka {
@@ -23,6 +24,8 @@ namespace kafka {
                     return encode_response(handle_api_versions(request));
                 case protocol::ApiKey::DescribeTopicPartition:
                     return encode_response(handle_describe_topic_partition(request));
+                case protocol::ApiKey::Produce:
+                    return encode_response(handle_produce(request));
                 default:
                     return encode_response(handle_error(request.header.correlation_id, protocol::error::UnsupportedError));
             }
@@ -51,7 +54,8 @@ namespace kafka {
 
         if (header.header_version == 1) {
             header.client_id = decoder.read_nullable_string();
-            if (header.api_key == protocol::ApiKey::DescribeTopicPartition) {
+            if (header.api_key == protocol::ApiKey::DescribeTopicPartition ||
+                header.api_key == protocol::ApiKey::Produce) {
                 decoder.read_tag_buffer();
             }
         } else if (header.header_version == 2) {
@@ -83,7 +87,8 @@ namespace kafka {
                 std::vector<protocol::ApiSpec>(protocol::supported_apis().begin(), protocol::supported_apis().end()),
                 0
             },
-            protocol::DescribeTopicPartitionsResponseBody{}
+            protocol::DescribeTopicPartitionsResponseBody{},
+            protocol::ProduceResponseBody{}
         };
 
         return response;
@@ -95,7 +100,8 @@ namespace kafka {
             correlation_id,
             error_code,
             protocol::ApiVersionsResponseBody{},
-            protocol::DescribeTopicPartitionsResponseBody{}
+            protocol::DescribeTopicPartitionsResponseBody{},
+            protocol::ProduceResponseBody{}
         };
     }
 
@@ -157,6 +163,41 @@ namespace kafka {
             request.header.correlation_id,
             protocol::error::None,
             protocol::ApiVersionsResponseBody{},
+            body,
+            protocol::ProduceResponseBody{}
+        };
+    }
+
+    Response RequestHandler::handle_produce(const Request& request) {
+        protocol::Decoder decoder(request.buffer.data(), request.buffer.size());
+        auto produce_request = protocol::read_produce_request(decoder);
+
+        protocol::ProduceResponseBody body;
+        body.throttle_time_ms = 0;
+
+        for (const auto& requested_topic : produce_request.topics) {
+            protocol::ProduceResponseTopic topic_response;
+            topic_response.name = requested_topic.name;
+
+            for (const auto& requested_partition : requested_topic.partitions) {
+                topic_response.partitions.push_back(protocol::ProduceResponsePartition{
+                    requested_partition.index,
+                    protocol::error::UnknownTopicOrPartition,
+                    -1,
+                    -1,
+                    -1
+                });
+            }
+
+            body.topics.push_back(topic_response);
+        }
+
+        return Response{
+            Response::Type::Produce,
+            request.header.correlation_id,
+            protocol::error::None,
+            protocol::ApiVersionsResponseBody{},
+            protocol::DescribeTopicPartitionsResponseBody{},
             body
         };
     }
@@ -173,6 +214,9 @@ namespace kafka {
         } else if (response.type == Response::Type::DescribeTopicPartition) {
             encoder.write_tag_buffer();
             protocol::write_describe_topic_partitions_response(encoder, response.describe_topic_partition);
+        } else if (response.type == Response::Type::Produce) {
+            encoder.write_tag_buffer();
+            protocol::write_produce_response(encoder, response.produce);
         }
 
         encoder.write_message_size();
