@@ -1,6 +1,7 @@
 #include <kafka/request_handler.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -13,7 +14,10 @@
 #include <kafka/response.hpp>
 #include <kafka/error.hpp>
 #include <kafka/protocol/apis/api_versions.hpp>
+#include <kafka/protocol/apis/create_topics.hpp>
 #include <kafka/protocol/apis/describe_topic_partitions.hpp>
+#include <kafka/protocol/apis/fetch.hpp>
+#include <kafka/protocol/apis/list_offsets.hpp>
 #include <kafka/protocol/apis/produce.hpp>
 #include <kafka/protocol/error_codes.hpp>
 
@@ -27,21 +31,79 @@ namespace kafka {
                 "00000000000000000000.log";
         }
 
-        bool write_partition_records(
+        std::int64_t partition_log_size(const std::string& topic, std::int32_t partition_index) {
+            auto path = topic_partition_log_path(topic, partition_index);
+            if (!std::filesystem::exists(path)) {
+                return 0;
+            }
+
+            return static_cast<std::int64_t>(std::filesystem::file_size(path));
+        }
+
+        std::int64_t write_partition_records(
             const std::string& topic,
             std::int32_t partition_index,
             const std::vector<char>& records
         ) {
             auto path = topic_partition_log_path(topic, partition_index);
             std::filesystem::create_directories(path.parent_path());
+            std::int64_t base_offset = partition_log_size(topic, partition_index);
 
             std::ofstream file(path, std::ios::binary | std::ios::app);
             if (!file) {
-                return false;
+                return -1;
             }
 
             file.write(records.data(), static_cast<std::streamsize>(records.size()));
+            return file.good() ? base_offset : -1;
+        }
+
+        std::vector<char> read_partition_records(
+            const std::string& topic,
+            std::int32_t partition_index,
+            std::int64_t offset,
+            std::int32_t max_bytes
+        ) {
+            auto path = topic_partition_log_path(topic, partition_index);
+            if (!std::filesystem::exists(path) || offset < 0) {
+                return {};
+            }
+
+            std::ifstream file(path, std::ios::binary);
+            if (!file) {
+                return {};
+            }
+
+            auto size = partition_log_size(topic, partition_index);
+            if (offset >= size) {
+                return {};
+            }
+
+            auto bytes_to_read = size - offset;
+            if (max_bytes > 0) {
+                bytes_to_read = std::min<std::int64_t>(bytes_to_read, max_bytes);
+            }
+
+            std::vector<char> records(static_cast<std::size_t>(bytes_to_read));
+            file.seekg(offset);
+            file.read(records.data(), static_cast<std::streamsize>(records.size()));
+            records.resize(static_cast<std::size_t>(file.gcount()));
+            return records;
+        }
+
+        bool create_topic_partition_log(const std::string& topic, std::int32_t partition_index) {
+            auto path = topic_partition_log_path(topic, partition_index);
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream file(path, std::ios::binary | std::ios::app);
             return file.good();
+        }
+
+        bool partition_exists(const TopicMetadata* topic_metadata, std::int32_t partition_index) {
+            return topic_metadata != nullptr &&
+                std::any_of(topic_metadata->partitions.begin(), topic_metadata->partitions.end(),
+                    [&](const auto& partition_metadata) {
+                        return partition_metadata.partition_index == partition_index;
+                    });
         }
     }
 
@@ -60,6 +122,12 @@ namespace kafka {
                     return encode_response(handle_describe_topic_partition(request));
                 case protocol::ApiKey::Produce:
                     return encode_response(handle_produce(request));
+                case protocol::ApiKey::Fetch:
+                    return encode_response(handle_fetch(request));
+                case protocol::ApiKey::ListOffsets:
+                    return encode_response(handle_list_offsets(request));
+                case protocol::ApiKey::CreateTopics:
+                    return encode_response(handle_create_topics(request));
                 default:
                     return encode_response(handle_error(request.header.correlation_id, protocol::error::UnsupportedError));
             }
@@ -88,8 +156,7 @@ namespace kafka {
 
         if (header.header_version == 1) {
             header.client_id = decoder.read_nullable_string();
-            if (header.api_key == protocol::ApiKey::DescribeTopicPartition ||
-                header.api_key == protocol::ApiKey::Produce) {
+            if (header.api_key != protocol::ApiKey::ApiVersion) {
                 decoder.read_tag_buffer();
             }
         } else if (header.header_version == 2) {
@@ -146,7 +213,7 @@ namespace kafka {
         protocol::DescribeTopicPartitionsResponseBody body;
         body.throttle_time_ms = 0;
         body.next_cursor = -1;
-        auto metadata = ClusterMetadata::read_from_default_path();
+        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
 
         for (const auto& requested_topic : describe_request.topics) {
             const auto* topic_metadata = metadata.find_topic(requested_topic.name);
@@ -208,7 +275,7 @@ namespace kafka {
 
         protocol::ProduceResponseBody body;
         body.throttle_time_ms = 0;
-        auto metadata = ClusterMetadata::read_from_default_path();
+        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
 
         for (const auto& requested_topic : produce_request.topics) {
             protocol::ProduceResponseTopic topic_response;
@@ -216,18 +283,12 @@ namespace kafka {
             const auto* topic_metadata = metadata.find_topic(requested_topic.name);
 
             for (const auto& requested_partition : requested_topic.partitions) {
-                const bool partition_exists = topic_metadata != nullptr &&
-                    std::any_of(topic_metadata->partitions.begin(), topic_metadata->partitions.end(),
-                        [&](const auto& partition_metadata) {
-                            return partition_metadata.partition_index == requested_partition.index;
-                        });
-
-                if (partition_exists) {
-                    write_partition_records(requested_topic.name, requested_partition.index, requested_partition.records);
+                if (partition_exists(topic_metadata, requested_partition.index)) {
+                    auto base_offset = write_partition_records(requested_topic.name, requested_partition.index, requested_partition.records);
                     topic_response.partitions.push_back(protocol::ProduceResponsePartition{
                         requested_partition.index,
-                        protocol::error::None,
-                        0,
+                        base_offset >= 0 ? protocol::error::None : protocol::error::UnsupportedError,
+                        base_offset,
                         -1,
                         0
                     });
@@ -256,6 +317,166 @@ namespace kafka {
         };
     }
 
+    Response RequestHandler::handle_fetch(const Request& request) {
+        protocol::Decoder decoder(request.buffer.data(), request.buffer.size());
+        auto fetch_request = protocol::read_fetch_request(decoder);
+
+        protocol::FetchResponseBody body;
+        body.throttle_time_ms = 0;
+        body.error_code = protocol::error::None;
+        body.session_id = 0;
+        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+
+        for (const auto& requested_topic : fetch_request.topics) {
+            protocol::FetchResponseTopic topic_response;
+            topic_response.name = requested_topic.name;
+            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
+
+            for (const auto& requested_partition : requested_topic.partitions) {
+                auto high_watermark = partition_log_size(requested_topic.name, requested_partition.index);
+                auto max_bytes = requested_partition.partition_max_bytes > 0
+                    ? requested_partition.partition_max_bytes
+                    : fetch_request.max_bytes;
+
+                if (partition_exists(topic_metadata, requested_partition.index)) {
+                    topic_response.partitions.push_back(protocol::FetchResponsePartition{
+                        requested_partition.index,
+                        protocol::error::None,
+                        high_watermark,
+                        0,
+                        read_partition_records(
+                            requested_topic.name,
+                            requested_partition.index,
+                            requested_partition.fetch_offset,
+                            max_bytes
+                        )
+                    });
+                    continue;
+                }
+
+                topic_response.partitions.push_back(protocol::FetchResponsePartition{
+                    requested_partition.index,
+                    protocol::error::UnknownTopicOrPartition,
+                    -1,
+                    -1,
+                    {}
+                });
+            }
+
+            body.topics.push_back(topic_response);
+        }
+
+        return Response{
+            Response::Type::Fetch,
+            request.header.correlation_id,
+            protocol::error::None,
+            protocol::ApiVersionsResponseBody{},
+            protocol::DescribeTopicPartitionsResponseBody{},
+            protocol::ProduceResponseBody{},
+            body
+        };
+    }
+
+    Response RequestHandler::handle_list_offsets(const Request& request) {
+        protocol::Decoder decoder(request.buffer.data(), request.buffer.size());
+        auto list_offsets_request = protocol::read_list_offsets_request(decoder);
+
+        protocol::ListOffsetsResponseBody body;
+        body.throttle_time_ms = 0;
+        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+
+        for (const auto& requested_topic : list_offsets_request.topics) {
+            protocol::ListOffsetsResponseTopic topic_response;
+            topic_response.name = requested_topic.name;
+            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
+
+            for (const auto& requested_partition : requested_topic.partitions) {
+                if (partition_exists(topic_metadata, requested_partition.index)) {
+                    const auto offset = requested_partition.timestamp == -2
+                        ? 0
+                        : partition_log_size(requested_topic.name, requested_partition.index);
+                    topic_response.partitions.push_back(protocol::ListOffsetsResponsePartition{
+                        requested_partition.index,
+                        protocol::error::None,
+                        requested_partition.timestamp,
+                        offset
+                    });
+                    continue;
+                }
+
+                topic_response.partitions.push_back(protocol::ListOffsetsResponsePartition{
+                    requested_partition.index,
+                    protocol::error::UnknownTopicOrPartition,
+                    requested_partition.timestamp,
+                    -1
+                });
+            }
+
+            body.topics.push_back(topic_response);
+        }
+
+        return Response{
+            Response::Type::ListOffsets,
+            request.header.correlation_id,
+            protocol::error::None,
+            protocol::ApiVersionsResponseBody{},
+            protocol::DescribeTopicPartitionsResponseBody{},
+            protocol::ProduceResponseBody{},
+            protocol::FetchResponseBody{},
+            body
+        };
+    }
+
+    Response RequestHandler::handle_create_topics(const Request& request) {
+        protocol::Decoder decoder(request.buffer.data(), request.buffer.size());
+        auto create_topics_request = protocol::read_create_topics_request(decoder);
+
+        protocol::CreateTopicsResponseBody body;
+        body.throttle_time_ms = 0;
+        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+
+        for (const auto& requested_topic : create_topics_request.topics) {
+            auto partition_count = std::max<std::int32_t>(requested_topic.num_partitions, 1);
+            auto replication_factor = requested_topic.replication_factor > 0
+                ? requested_topic.replication_factor
+                : static_cast<std::int16_t>(1);
+
+            if (metadata.find_topic(requested_topic.name) != nullptr) {
+                body.topics.push_back(protocol::CreateTopicsResponseTopic{
+                    requested_topic.name,
+                    protocol::error::TopicAlreadyExists,
+                    partition_count,
+                    replication_factor
+                });
+                continue;
+            }
+
+            bool created = true;
+            for (std::int32_t partition = 0; partition < partition_count; ++partition) {
+                created = create_topic_partition_log(requested_topic.name, partition) && created;
+            }
+
+            body.topics.push_back(protocol::CreateTopicsResponseTopic{
+                requested_topic.name,
+                created ? protocol::error::None : protocol::error::UnsupportedError,
+                partition_count,
+                replication_factor
+            });
+        }
+
+        return Response{
+            Response::Type::CreateTopics,
+            request.header.correlation_id,
+            protocol::error::None,
+            protocol::ApiVersionsResponseBody{},
+            protocol::DescribeTopicPartitionsResponseBody{},
+            protocol::ProduceResponseBody{},
+            protocol::FetchResponseBody{},
+            protocol::ListOffsetsResponseBody{},
+            body
+        };
+    }
+
     std::vector<char> RequestHandler::encode_response(const Response& response) {
         protocol::Encoder encoder;
 
@@ -271,6 +492,15 @@ namespace kafka {
         } else if (response.type == Response::Type::Produce) {
             encoder.write_tag_buffer();
             protocol::write_produce_response(encoder, response.produce);
+        } else if (response.type == Response::Type::Fetch) {
+            encoder.write_tag_buffer();
+            protocol::write_fetch_response(encoder, response.fetch);
+        } else if (response.type == Response::Type::ListOffsets) {
+            encoder.write_tag_buffer();
+            protocol::write_list_offsets_response(encoder, response.list_offsets);
+        } else if (response.type == Response::Type::CreateTopics) {
+            encoder.write_tag_buffer();
+            protocol::write_create_topics_response(encoder, response.create_topics);
         }
 
         encoder.write_message_size();

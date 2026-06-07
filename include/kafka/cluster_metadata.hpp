@@ -25,6 +25,7 @@ struct TopicMetadata {
 class ClusterMetadata {
     public:
         static ClusterMetadata read_from_default_path();
+        static ClusterMetadata read_from_log_dir(const std::string& log_dir);
         static ClusterMetadata read_from_path(const std::string& path);
 
         const TopicMetadata* find_topic(const std::string& name) const;

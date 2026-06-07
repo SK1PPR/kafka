@@ -1,18 +1,63 @@
 #include <kafka/cluster_metadata.hpp>
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <unordered_map>
 
 namespace kafka {
 
 namespace {
-    constexpr const char* DEFAULT_METADATA_LOG_PATH =
-        "/tmp/kraft-combined-logs/__cluster_metadata-0/00000000000000000000.log";
+    std::filesystem::path metadata_log_path(const std::string& log_dir) {
+        return std::filesystem::path(log_dir) / "__cluster_metadata-0" / "00000000000000000000.log";
+    }
 
     std::string uuid_key(const std::array<std::uint8_t, 16>& uuid) {
         return std::string(reinterpret_cast<const char*>(uuid.data()), uuid.size());
+    }
+
+    std::array<std::uint8_t, 16> deterministic_topic_id(const std::string& topic) {
+        std::array<std::uint8_t, 16> uuid{};
+        auto first = std::hash<std::string>{}(topic);
+        auto second = std::hash<std::string>{}("kafka-cpp:" + topic);
+
+        for (int i = 0; i < 8; ++i) {
+            uuid[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((first >> (i * 8)) & 0xff);
+            uuid[static_cast<std::size_t>(i + 8)] = static_cast<std::uint8_t>((second >> (i * 8)) & 0xff);
+        }
+
+        return uuid;
+    }
+
+    bool parse_topic_partition_dir(
+        const std::filesystem::path& path,
+        std::string& topic,
+        std::int32_t& partition_index
+    ) {
+        if (!std::filesystem::is_directory(path)) {
+            return false;
+        }
+
+        auto name = path.filename().string();
+        auto separator = name.rfind('-');
+        if (separator == std::string::npos || separator == 0 || separator == name.size() - 1) {
+            return false;
+        }
+
+        try {
+            topic = name.substr(0, separator);
+            std::size_t parsed = 0;
+            auto partition = std::stoi(name.substr(separator + 1), &parsed);
+            if (parsed != name.size() - separator - 1 || partition < 0) {
+                return false;
+            }
+            partition_index = partition;
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
     }
 
     class MetadataReader {
@@ -293,7 +338,56 @@ namespace {
 }
 
 ClusterMetadata ClusterMetadata::read_from_default_path() {
-    return read_from_path(DEFAULT_METADATA_LOG_PATH);
+    return read_from_log_dir("/tmp/kraft-combined-logs");
+}
+
+ClusterMetadata ClusterMetadata::read_from_log_dir(const std::string& log_dir) {
+    ClusterMetadata metadata = read_from_path(metadata_log_path(log_dir).string());
+    if (!std::filesystem::exists(log_dir)) {
+        return metadata;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(log_dir)) {
+        std::string topic_name;
+        std::int32_t partition_index = 0;
+        if (!parse_topic_partition_dir(entry.path(), topic_name, partition_index)) {
+            continue;
+        }
+
+        auto* topic = const_cast<TopicMetadata*>(metadata.find_topic(topic_name));
+        if (topic == nullptr) {
+            TopicMetadata new_topic;
+            new_topic.name = topic_name;
+            new_topic.topic_id = deterministic_topic_id(topic_name);
+            metadata._topics.push_back(new_topic);
+            topic = &metadata._topics.back();
+        }
+
+        const bool partition_known = std::any_of(topic->partitions.begin(), topic->partitions.end(), [&](const auto& partition) {
+            return partition.partition_index == partition_index;
+        });
+        if (!partition_known) {
+            topic->partitions.push_back(PartitionMetadata{
+                partition_index,
+                0,
+                0,
+                {0},
+                {0}
+            });
+        }
+    }
+
+    for (auto& topic : metadata._topics) {
+        std::sort(topic.partitions.begin(), topic.partitions.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.partition_index < rhs.partition_index;
+        });
+    }
+
+    std::sort(metadata._topics.begin(), metadata._topics.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.name < rhs.name;
+    });
+
+    return metadata;
 }
 
 ClusterMetadata ClusterMetadata::read_from_path(const std::string& path) {
