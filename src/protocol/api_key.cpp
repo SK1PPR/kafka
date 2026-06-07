@@ -4,10 +4,13 @@
 
 namespace kafka {
     namespace protocol {
-        inline constexpr std::array<ApiSpec, 3> SUPPORTED_APIS = {{
+        inline constexpr std::array<ApiSpec, 6> SUPPORTED_APIS = {{
             {ApiKey::ApiVersion, 0, 4, 0, 0},
             {ApiKey::DescribeTopicPartition, 0, 0, 1, 1},
-            {ApiKey::Produce, 0, 11, 1, 1}
+            {ApiKey::Produce, 0, 11, 1, 1},
+            {ApiKey::Fetch, 11, 16, 1, 1},
+            {ApiKey::ListOffsets, 7, 10, 1, 1},
+            {ApiKey::CreateTopics, 5, 7, 1, 1}
         }};
 
         std::span<const ApiSpec> supported_apis() {

@@ -51,6 +51,11 @@ namespace kafka {
             _buffer.insert(_buffer.end(), value.begin(), value.end());
         }
 
+        void Encoder::write_compact_nullable_bytes(const std::vector<char>& bytes) {
+            write_unsigned_varint(static_cast<std::uint32_t>(bytes.size() + 1));
+            write_bytes(bytes);
+        }
+
         void Encoder::write_tag_buffer() {
             write_unsigned_varint(0);
         }

@@ -9,7 +9,10 @@ namespace kafka {
         enum class ApiKey : std::int16_t {
           ApiVersion = 18,
           DescribeTopicPartition = 75,
-          Produce = 0
+          Produce = 0,
+          Fetch = 1,
+          ListOffsets = 2,
+          CreateTopics = 19
         };
 
         struct ApiSpec {

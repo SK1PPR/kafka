@@ -15,6 +15,7 @@ namespace kafka {
             void write_message_size();
             void write_unsigned_varint(std::uint32_t value);
             void write_compact_string(const std::string& value);
+            void write_compact_nullable_bytes(const std::vector<char>& bytes);
             void write_tag_buffer();
 
             void write_bytes(const std::vector<char>& bytes);
