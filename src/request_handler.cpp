@@ -1,13 +1,14 @@
 #include <kafka/request_handler.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
-#include <filesystem>
-#include <fstream>
+#include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
-#include <kafka/cluster_metadata.hpp>
 #include <kafka/protocol/api_key.hpp>
 #include <kafka/protocol/encoder.hpp>
 #include <kafka/request.hpp>
@@ -23,58 +24,91 @@
 
 namespace kafka {
     namespace {
-        thread_local std::string LOG_DIR = "/tmp/kraft-combined-logs";
+        struct PartitionState {
+            std::vector<char> records;
+        };
 
-        std::filesystem::path topic_partition_log_path(const std::string& topic, std::int32_t partition_index) {
-            return std::filesystem::path(LOG_DIR) /
-                (topic + "-" + std::to_string(partition_index)) /
-                "00000000000000000000.log";
-        }
+        struct TopicState {
+            std::array<std::uint8_t, 16> topic_id{};
+            std::unordered_map<std::int32_t, PartitionState> partitions;
+        };
 
-        std::int64_t partition_log_size(const std::string& topic, std::int32_t partition_index) {
-            auto path = topic_partition_log_path(topic, partition_index);
-            if (!std::filesystem::exists(path)) {
-                return 0;
+        std::mutex STORE_MUTEX;
+        std::unordered_map<std::string, TopicState> TOPICS;
+
+        std::array<std::uint8_t, 16> deterministic_topic_id(const std::string& topic) {
+            std::array<std::uint8_t, 16> uuid{};
+            auto first = std::hash<std::string>{}(topic);
+            auto second = std::hash<std::string>{}("kafka-cpp:" + topic);
+
+            for (int i = 0; i < 8; ++i) {
+                uuid[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>((first >> (i * 8)) & 0xff);
+                uuid[static_cast<std::size_t>(i + 8)] = static_cast<std::uint8_t>((second >> (i * 8)) & 0xff);
             }
 
-            return static_cast<std::int64_t>(std::filesystem::file_size(path));
+            return uuid;
         }
 
-        std::int64_t write_partition_records(
-            const std::string& topic,
-            std::int32_t partition_index,
-            const std::vector<char>& records
-        ) {
-            auto path = topic_partition_log_path(topic, partition_index);
-            std::filesystem::create_directories(path.parent_path());
-            std::int64_t base_offset = partition_log_size(topic, partition_index);
+        const TopicState* find_topic(const std::string& topic) {
+            auto iter = TOPICS.find(topic);
+            if (iter == TOPICS.end()) {
+                return nullptr;
+            }
+            return &iter->second;
+        }
 
-            std::ofstream file(path, std::ios::binary | std::ios::app);
-            if (!file) {
+        TopicState* find_mutable_topic(const std::string& topic) {
+            auto iter = TOPICS.find(topic);
+            if (iter == TOPICS.end()) {
+                return nullptr;
+            }
+            return &iter->second;
+        }
+
+        bool partition_exists(const TopicState* topic, std::int32_t partition_index) {
+            return topic != nullptr && topic->partitions.find(partition_index) != topic->partitions.end();
+        }
+
+        std::vector<std::int32_t> sorted_partition_indexes(const TopicState& topic) {
+            std::vector<std::int32_t> indexes;
+            indexes.reserve(topic.partitions.size());
+            for (const auto& [partition_index, _] : topic.partitions) {
+                indexes.push_back(partition_index);
+            }
+            std::sort(indexes.begin(), indexes.end());
+            return indexes;
+        }
+
+        std::int64_t partition_log_size(const TopicState* topic, std::int32_t partition_index) {
+            if (!partition_exists(topic, partition_index)) {
+                return 0;
+            }
+            return static_cast<std::int64_t>(topic->partitions.at(partition_index).records.size());
+        }
+
+        std::int64_t write_partition_records(TopicState* topic, std::int32_t partition_index, const std::vector<char>& records) {
+            if (!partition_exists(topic, partition_index)) {
                 return -1;
             }
 
-            file.write(records.data(), static_cast<std::streamsize>(records.size()));
-            return file.good() ? base_offset : -1;
+            auto& partition_records = topic->partitions[partition_index].records;
+            auto base_offset = static_cast<std::int64_t>(partition_records.size());
+            partition_records.insert(partition_records.end(), records.begin(), records.end());
+            return base_offset;
         }
 
         std::vector<char> read_partition_records(
-            const std::string& topic,
+            const TopicState* topic,
             std::int32_t partition_index,
             std::int64_t offset,
             std::int32_t max_bytes
         ) {
-            auto path = topic_partition_log_path(topic, partition_index);
-            if (!std::filesystem::exists(path) || offset < 0) {
+            if (!partition_exists(topic, partition_index) || offset < 0) {
                 return {};
             }
 
-            std::ifstream file(path, std::ios::binary);
-            if (!file) {
-                return {};
-            }
-
-            auto size = partition_log_size(topic, partition_index);
+            const auto& records = topic->partitions.at(partition_index).records;
+            auto size = static_cast<std::int64_t>(records.size());
             if (offset >= size) {
                 return {};
             }
@@ -84,31 +118,19 @@ namespace kafka {
                 bytes_to_read = std::min<std::int64_t>(bytes_to_read, max_bytes);
             }
 
-            std::vector<char> records(static_cast<std::size_t>(bytes_to_read));
-            file.seekg(offset);
-            file.read(records.data(), static_cast<std::streamsize>(records.size()));
-            records.resize(static_cast<std::size_t>(file.gcount()));
-            return records;
-        }
-
-        bool create_topic_partition_log(const std::string& topic, std::int32_t partition_index) {
-            auto path = topic_partition_log_path(topic, partition_index);
-            std::filesystem::create_directories(path.parent_path());
-            std::ofstream file(path, std::ios::binary | std::ios::app);
-            return file.good();
-        }
-
-        bool partition_exists(const TopicMetadata* topic_metadata, std::int32_t partition_index) {
-            return topic_metadata != nullptr &&
-                std::any_of(topic_metadata->partitions.begin(), topic_metadata->partitions.end(),
-                    [&](const auto& partition_metadata) {
-                        return partition_metadata.partition_index == partition_index;
-                    });
+            auto begin = records.begin() + static_cast<std::ptrdiff_t>(offset);
+            auto end = begin + static_cast<std::ptrdiff_t>(bytes_to_read);
+            return {begin, end};
         }
     }
 
     void RequestHandler::set_log_dir(std::string log_dir) {
-        LOG_DIR = std::move(log_dir);
+        (void)log_dir;
+    }
+
+    void RequestHandler::reset_state() {
+        std::lock_guard<std::mutex> lock(STORE_MUTEX);
+        TOPICS.clear();
     }
 
     std::vector<char> RequestHandler::handle_request(const std::vector<char>& input_buffer) {
@@ -213,28 +235,28 @@ namespace kafka {
         protocol::DescribeTopicPartitionsResponseBody body;
         body.throttle_time_ms = 0;
         body.next_cursor = -1;
-        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+        std::lock_guard<std::mutex> lock(STORE_MUTEX);
 
         for (const auto& requested_topic : describe_request.topics) {
-            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
-            if (topic_metadata != nullptr) {
+            const auto* topic = find_topic(requested_topic.name);
+            if (topic != nullptr) {
                 protocol::DescribeTopicPartitionsResponseTopic topic_response{
                     protocol::error::None,
                     requested_topic.name,
-                    topic_metadata->topic_id,
+                    topic->topic_id,
                     false,
                     {},
                     0
                 };
 
-                for (const auto& partition_metadata : topic_metadata->partitions) {
+                for (const auto partition_index : sorted_partition_indexes(*topic)) {
                     topic_response.partitions.push_back(protocol::DescribeTopicPartitionsResponsePartition{
                         protocol::error::None,
-                        partition_metadata.partition_index,
-                        partition_metadata.leader_id,
-                        partition_metadata.leader_epoch,
-                        partition_metadata.replica_nodes,
-                        partition_metadata.isr_nodes,
+                        partition_index,
+                        0,
+                        0,
+                        {0},
+                        {0},
                         {},
                         {},
                         {}
@@ -275,16 +297,16 @@ namespace kafka {
 
         protocol::ProduceResponseBody body;
         body.throttle_time_ms = 0;
-        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+        std::lock_guard<std::mutex> lock(STORE_MUTEX);
 
         for (const auto& requested_topic : produce_request.topics) {
             protocol::ProduceResponseTopic topic_response;
             topic_response.name = requested_topic.name;
-            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
+            auto* topic = find_mutable_topic(requested_topic.name);
 
             for (const auto& requested_partition : requested_topic.partitions) {
-                if (partition_exists(topic_metadata, requested_partition.index)) {
-                    auto base_offset = write_partition_records(requested_topic.name, requested_partition.index, requested_partition.records);
+                if (partition_exists(topic, requested_partition.index)) {
+                    auto base_offset = write_partition_records(topic, requested_partition.index, requested_partition.records);
                     topic_response.partitions.push_back(protocol::ProduceResponsePartition{
                         requested_partition.index,
                         base_offset >= 0 ? protocol::error::None : protocol::error::UnsupportedError,
@@ -325,27 +347,27 @@ namespace kafka {
         body.throttle_time_ms = 0;
         body.error_code = protocol::error::None;
         body.session_id = 0;
-        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+        std::lock_guard<std::mutex> lock(STORE_MUTEX);
 
         for (const auto& requested_topic : fetch_request.topics) {
             protocol::FetchResponseTopic topic_response;
             topic_response.name = requested_topic.name;
-            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
+            const auto* topic = find_topic(requested_topic.name);
 
             for (const auto& requested_partition : requested_topic.partitions) {
-                auto high_watermark = partition_log_size(requested_topic.name, requested_partition.index);
+                auto high_watermark = partition_log_size(topic, requested_partition.index);
                 auto max_bytes = requested_partition.partition_max_bytes > 0
                     ? requested_partition.partition_max_bytes
                     : fetch_request.max_bytes;
 
-                if (partition_exists(topic_metadata, requested_partition.index)) {
+                if (partition_exists(topic, requested_partition.index)) {
                     topic_response.partitions.push_back(protocol::FetchResponsePartition{
                         requested_partition.index,
                         protocol::error::None,
                         high_watermark,
                         0,
                         read_partition_records(
-                            requested_topic.name,
+                            topic,
                             requested_partition.index,
                             requested_partition.fetch_offset,
                             max_bytes
@@ -383,18 +405,18 @@ namespace kafka {
 
         protocol::ListOffsetsResponseBody body;
         body.throttle_time_ms = 0;
-        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+        std::lock_guard<std::mutex> lock(STORE_MUTEX);
 
         for (const auto& requested_topic : list_offsets_request.topics) {
             protocol::ListOffsetsResponseTopic topic_response;
             topic_response.name = requested_topic.name;
-            const auto* topic_metadata = metadata.find_topic(requested_topic.name);
+            const auto* topic = find_topic(requested_topic.name);
 
             for (const auto& requested_partition : requested_topic.partitions) {
-                if (partition_exists(topic_metadata, requested_partition.index)) {
+                if (partition_exists(topic, requested_partition.index)) {
                     const auto offset = requested_partition.timestamp == -2
                         ? 0
-                        : partition_log_size(requested_topic.name, requested_partition.index);
+                        : partition_log_size(topic, requested_partition.index);
                     topic_response.partitions.push_back(protocol::ListOffsetsResponsePartition{
                         requested_partition.index,
                         protocol::error::None,
@@ -433,7 +455,7 @@ namespace kafka {
 
         protocol::CreateTopicsResponseBody body;
         body.throttle_time_ms = 0;
-        auto metadata = ClusterMetadata::read_from_log_dir(LOG_DIR);
+        std::lock_guard<std::mutex> lock(STORE_MUTEX);
 
         for (const auto& requested_topic : create_topics_request.topics) {
             auto partition_count = std::max<std::int32_t>(requested_topic.num_partitions, 1);
@@ -441,7 +463,7 @@ namespace kafka {
                 ? requested_topic.replication_factor
                 : static_cast<std::int16_t>(1);
 
-            if (metadata.find_topic(requested_topic.name) != nullptr) {
+            if (find_topic(requested_topic.name) != nullptr) {
                 body.topics.push_back(protocol::CreateTopicsResponseTopic{
                     requested_topic.name,
                     protocol::error::TopicAlreadyExists,
@@ -451,14 +473,16 @@ namespace kafka {
                 continue;
             }
 
-            bool created = true;
+            TopicState topic;
+            topic.topic_id = deterministic_topic_id(requested_topic.name);
             for (std::int32_t partition = 0; partition < partition_count; ++partition) {
-                created = create_topic_partition_log(requested_topic.name, partition) && created;
+                topic.partitions.emplace(partition, PartitionState{});
             }
+            TOPICS.emplace(requested_topic.name, std::move(topic));
 
             body.topics.push_back(protocol::CreateTopicsResponseTopic{
                 requested_topic.name,
-                created ? protocol::error::None : protocol::error::UnsupportedError,
+                protocol::error::None,
                 partition_count,
                 replication_factor
             });

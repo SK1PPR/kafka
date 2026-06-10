@@ -1,6 +1,5 @@
 #include <cassert>
 #include <cstdint>
-#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -233,10 +232,7 @@ std::vector<char> fetched_records(const std::vector<char>& response, std::int64_
 }
 
 void test_create_produce_list_offsets_and_fetch() {
-    auto log_dir = std::filesystem::temp_directory_path() / "kafka-cpp-api-tests";
-    std::filesystem::remove_all(log_dir);
-    std::filesystem::create_directories(log_dir);
-    kafka::RequestHandler::set_log_dir(log_dir.string());
+    kafka::RequestHandler::reset_state();
 
     const std::string topic = "orders";
     const std::vector<char> first_records{'a', 'b', 'c'};
@@ -246,8 +242,6 @@ void test_create_produce_list_offsets_and_fetch() {
         request_frame(ApiKey::CreateTopics, 5, create_topics_body(topic, 2))
     );
     assert_create_topic_response(create_response, kafka::protocol::error::None);
-    assert(std::filesystem::exists(log_dir / "orders-0" / "00000000000000000000.log"));
-    assert(std::filesystem::exists(log_dir / "orders-1" / "00000000000000000000.log"));
 
     auto duplicate_response = kafka::RequestHandler::handle_request(
         request_frame(ApiKey::CreateTopics, 5, create_topics_body(topic, 2))
@@ -284,8 +278,6 @@ void test_create_produce_list_offsets_and_fetch() {
         request_frame(ApiKey::Fetch, 11, fetch_body(topic, 0, first_records.size(), 1024))
     );
     assert(fetched_records(fetch_from_second_response, all_records.size()) == second_records);
-
-    std::filesystem::remove_all(log_dir);
 }
 
 } // namespace

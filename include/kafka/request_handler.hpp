@@ -11,6 +11,7 @@ namespace kafka {
         public:
             static std::vector<char> handle_request(const std::vector<char>& request);
             static void set_log_dir(std::string log_dir);
+            static void reset_state();
 
         private:
             static RequestHeader decode_request_header(protocol::Decoder& decoder);
